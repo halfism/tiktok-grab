@@ -1,12 +1,13 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Progress } from '@/components/ui/progress';
 import { Badge } from '@/components/ui/badge';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { SettingsDialog, useDownloadConfig, DownloadConfig } from '@/components/settings-dialog';
 import { 
   Download, 
   Link2, 
@@ -14,14 +15,16 @@ import {
   Image, 
   Music, 
   Radio, 
-  Settings, 
+  Settings2,
   RefreshCw,
   CheckCircle2,
   XCircle,
   Loader2,
   Copy,
   ExternalLink,
-  FolderDown
+  FolderDown,
+  FolderOpen,
+  User
 } from 'lucide-react';
 import { toast } from 'sonner';
 
@@ -50,6 +53,7 @@ interface DownloadTask {
   status: 'pending' | 'downloading' | 'completed' | 'failed';
   progress: number;
   error?: string;
+  archivePath?: string;  // 实际归档路径
 }
 
 export default function Home() {
@@ -58,6 +62,7 @@ export default function Home() {
   const [parseResults, setParseResults] = useState<ParseResult[]>([]);
   const [downloadTasks, setDownloadTasks] = useState<DownloadTask[]>([]);
   const [activeTab, setActiveTab] = useState('parse');
+  const downloadConfig = useDownloadConfig();
 
   // 平台检测
   const detectPlatform = (url: string): 'douyin' | 'tiktok' | null => {
@@ -109,13 +114,58 @@ export default function Home() {
     }
   };
 
+  // 构建归档文件名
+  const buildFilename = (result: ParseResult, config: DownloadConfig): string => {
+    let filename = config.filenameTemplate;
+    const replacements: Record<string, string> = {
+      '{author}': result.author,
+      '{authorId}': result.authorId,
+      '{title}': result.title,
+      '{id}': result.id,
+      '{date}': result.createTime.split('T')[0],
+      '{type}': result.type,
+      '{platform}': result.platform,
+    };
+    
+    for (const [key, value] of Object.entries(replacements)) {
+      filename = filename.replace(key, value);
+    }
+    
+    // 清理文件名中的特殊字符
+    return filename.replace(/[<>:"\/\\|?*]/g, '_');
+  };
+
+  // 构建归档路径
+  const buildArchivePath = (result: ParseResult, filename: string, config: DownloadConfig): string => {
+    let path = '';
+    
+    if (config.organizeByAuthor) {
+      path += `/${result.author.replace(/[<>:"\/\\|?*]/g, '_')}`;
+    }
+    if (config.organizeByType) {
+      const typeDir = result.type === 'video' ? '视频' : result.type === 'images' ? '图集' : result.type === 'audio' ? '音频' : '直播';
+      path += `/${typeDir}`;
+    }
+    if (config.organizeByDate) {
+      path += `/${result.createTime.split('T')[0]}`;
+    }
+    
+    return path;
+  };
+
   // 下载单个资源
   const handleDownload = async (result: ParseResult) => {
+    const filename = buildFilename(result, downloadConfig);
+    const archivePath = buildArchivePath(result, filename, downloadConfig);
+    const extension = result.type === 'video' ? 'mp4' : result.type === 'audio' ? 'mp3' : 'zip';
+    const fullFilename = `${filename}.${extension}`;
+    
     const task: DownloadTask = {
       id: `${result.id}-${Date.now()}`,
       result,
       status: 'downloading',
       progress: 0,
+      archivePath: `${downloadConfig.downloadDir}${archivePath}/${fullFilename}`,
     };
 
     setDownloadTasks(prev => [task, ...prev]);
@@ -126,8 +176,17 @@ export default function Home() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ 
           url: result.downloadUrl, 
-          filename: `${result.author}_${result.title}_${result.id}`,
-          type: result.type
+          filename: fullFilename,
+          type: result.type,
+          archivePath: archivePath,
+          config: {
+            downloadDir: downloadConfig.downloadDir,
+            organizeByAuthor: downloadConfig.organizeByAuthor,
+            organizeByType: downloadConfig.organizeByType,
+            organizeByDate: downloadConfig.organizeByDate,
+          },
+          author: result.author,
+          authorId: result.authorId,
         }),
       });
 
@@ -140,7 +199,9 @@ export default function Home() {
       const url = window.URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = `${result.author}_${result.title}_${result.id}.${result.type === 'video' ? 'mp4' : result.type === 'audio' ? 'mp3' : 'zip'}`;
+      
+      // 浏览器下载时保持归档结构（通过文件夹前缀模拟）
+      a.download = `${result.author.replace(/[<>:"\/\\|?*]/g, '_')}${archivePath}/${fullFilename}`;
       document.body.appendChild(a);
       a.click();
       window.URL.revokeObjectURL(url);
@@ -149,7 +210,7 @@ export default function Home() {
       setDownloadTasks(prev => 
         prev.map(t => t.id === task.id ? { ...t, status: 'completed', progress: 100 } : t)
       );
-      toast.success('下载完成！');
+      toast.success(`下载完成！已保存到: ${task.archivePath}`);
     } catch (error) {
       setDownloadTasks(prev => 
         prev.map(t => t.id === task.id ? { ...t, status: 'failed', error: '下载失败' } : t)
@@ -225,9 +286,7 @@ export default function Home() {
                   TikTok
                 </span>
               </Badge>
-              <Button variant="ghost" size="icon" className="text-slate-400 hover:text-white">
-                <Settings className="w-5 h-5" />
-              </Button>
+              <SettingsDialog />
             </div>
           </div>
         </div>
@@ -475,10 +534,24 @@ export default function Home() {
                           {/* 状态文字 */}
                           <div className="text-xs text-slate-500 mt-1">
                             {task.status === 'downloading' && `下载中... ${task.progress}%`}
-                            {task.status === 'completed' && '下载完成'}
+                            {task.status === 'completed' && (
+                              <span className="flex items-center gap-1.5">
+                                <FolderOpen className="w-3 h-3" />
+                                已保存: {task.archivePath}
+                              </span>
+                            )}
                             {task.status === 'failed' && (task.error || '下载失败')}
                             {task.status === 'pending' && '等待下载'}
                           </div>
+                          
+                          {/* 归档路径预览 */}
+                          {task.archivePath && task.status !== 'completed' && (
+                            <div className="text-xs text-slate-400 mt-1 flex items-center gap-1">
+                              <User className="w-3 h-3" />
+                              <span className="text-slate-500">归档至:</span>
+                              <code className="text-blue-400/70">{task.archivePath}</code>
+                            </div>
+                          )}
                         </div>
                         
                         {/* 重试按钮 */}
@@ -548,7 +621,7 @@ export default function Home() {
                 {/* 高级参数配置 */}
                 <div className="p-4 rounded-lg bg-slate-800/30 border-slate-700/30">
                   <h4 className="text-white mb-3 flex items-center gap-2">
-                    <Settings className="w-4 h-4 text-slate-400" />
+                    <Settings2 className="w-4 h-4 text-slate-400" />
                     采集参数配置
                   </h4>
                   <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
